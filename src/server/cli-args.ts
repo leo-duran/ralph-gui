@@ -36,6 +36,7 @@ export async function applyCliSettingsOverrides(loop: {
   const agentBackendArg = getArg("--agent-backend");
   const agentBackendOverride = agentBackendArg ? normalizeAgentBackend(agentBackendArg) : undefined;
 
+  const mcpConfigArg = getArg("--mcp-config");
   const next: Settings = {
     ...current,
     ...(getArg("--plan-model") ? { planModel: getArg("--plan-model")! } : {}),
@@ -48,6 +49,7 @@ export async function applyCliSettingsOverrides(loop: {
     ...(getNumberArg("--min-backlog-size") !== undefined ? { minBacklogSize: getNumberArg("--min-backlog-size")! } : {}),
     ...(getBooleanArg("--auto-commit") !== undefined ? { autoCommit: getBooleanArg("--auto-commit")! } : {}),
     ...(agentBackendOverride ? { agentBackend: agentBackendOverride } : {}),
+    ...(mcpConfigArg !== undefined ? { agentMcpConfig: mcpConfigArg } : {}),
   };
 
   await loop.writeSettings(next);

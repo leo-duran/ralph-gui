@@ -222,7 +222,7 @@ export class RalphLoop {
         fullPlanPrompt,
         settings.planModel,
         this.repoRoot,
-        { agentBackend: settings.agentBackend }
+        { agentBackend: settings.agentBackend, agentMcpConfig: settings.agentMcpConfig }
       );
 
       if (output.includes("<status>complete</status>")) {
@@ -380,7 +380,7 @@ export class RalphLoop {
           planPrompt,
           settings.planModel,
           this.repoRoot,
-          { agentBackend: settings.agentBackend }
+          { agentBackend: settings.agentBackend, agentMcpConfig: settings.agentMcpConfig }
         );
       } catch (err) {
         throw new Error(`Plan phase failed: ${err}`);
@@ -504,6 +504,7 @@ export class RalphLoop {
             {
               agentBackend: s.agentBackend,
               reasoningEffort: s.devReasoningEffort,
+              agentMcpConfig: s.agentMcpConfig,
             }
           );
         } catch (err) {
@@ -573,6 +574,7 @@ export class RalphLoop {
           {
             agentBackend: s.agentBackend,
             reasoningEffort: s.qaReasoningEffort,
+            agentMcpConfig: s.agentMcpConfig,
           }
         );
       } catch (err) {

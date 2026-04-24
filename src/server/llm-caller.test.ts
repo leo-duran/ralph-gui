@@ -2,17 +2,20 @@ import { EventEmitter } from "events";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import os from "os";
 import path from "path";
-import { chmod, mkdtemp, rm, writeFile } from "fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 
-const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+const { spawnMock, execFileMock } = vi.hoisted(() => ({ spawnMock: vi.fn(), execFileMock: vi.fn() }));
 
 vi.mock("child_process", () => ({
   spawn: spawnMock,
+  execFile: execFileMock,
 }));
 
 import {
   backendSupportsReasoningEffort,
   LLMCaller,
+  resolveAgentMcpConfigPath,
+  resolveEffectiveMcpConfigPath,
   normalizeAgentBackend,
   normalizePromptForArgv,
   resolveClaudeCommand,
@@ -46,6 +49,22 @@ beforeEach(async () => {
   tmpDir = await mkdtemp(path.join(os.tmpdir(), "ralph-copilot-"));
   spawnMock.mockReset();
   spawnMock.mockImplementation(() => new MockChildProcess());
+  execFileMock.mockReset();
+  execFileMock.mockImplementation(
+    (_file, args, options, callback) => {
+      const cb = typeof options === "function" ? (options as (err: Error | null, stdout?: string) => void) : callback;
+      if (Array.isArray(args) && args[0] === "--help") {
+        setImmediate(() => {
+          (cb as (e: Error | null, s?: string) => void)(null, "help text (no mcp path flag in this default mock)\n");
+        });
+        return { on: vi.fn() } as any;
+      }
+      setImmediate(() => {
+        (cb as (e: Error | null) => void)(new Error("unexpected execFile in test"));
+      });
+      return { on: vi.fn() } as any;
+    },
+  );
 });
 
 afterEach(async () => {
@@ -205,6 +224,86 @@ describe("normalizeAgentBackend", () => {
   });
 });
 
+describe("resolveAgentMcpConfigPath", () => {
+  it("returns null for empty or whitespace", async () => {
+    expect(await resolveAgentMcpConfigPath(undefined, tmpDir)).toBe(null);
+    expect(await resolveAgentMcpConfigPath("", tmpDir)).toBe(null);
+    expect(await resolveAgentMcpConfigPath("   ", tmpDir)).toBe(null);
+  });
+
+  it("resolves relative paths from repo root and validates existence", async () => {
+    const mcpName = "my-mcp.json";
+    const fullPath = path.join(tmpDir, mcpName);
+    await writeFile(fullPath, "{}", "utf-8");
+    const resolved = await resolveAgentMcpConfigPath(mcpName, tmpDir);
+    expect(resolved).toBe(path.resolve(fullPath));
+  });
+
+  it("throws when the file does not exist", async () => {
+    await expect(
+      resolveAgentMcpConfigPath("nope-mcp.json", tmpDir),
+    ).rejects.toThrow("MCP config file not found");
+  });
+});
+
+describe("resolveEffectiveMcpConfigPath", () => {
+  it("uses explicit path when set", async () => {
+    const f = path.join(tmpDir, "e.json");
+    await writeFile(f, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath("e.json", tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "x") });
+    expect(r).toBe(path.resolve(f));
+  });
+
+  it("picks target repo mcp.json when no explicit config", async () => {
+    const f = path.join(tmpDir, "mcp.json");
+    await writeFile(f, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath("", tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "gui") });
+    expect(r).toBe(path.resolve(f));
+  });
+
+  it("prefers target repo mcp.json over ralph-gui fallbacks", async () => {
+    const repoMcp = path.join(tmpDir, "mcp.json");
+    const guiRoot = path.join(tmpDir, "gui");
+    await writeFile(repoMcp, "{}", "utf-8");
+    const expMcp = path.join(guiRoot, "experiments", "mcp.json");
+    await mkdir(path.dirname(expMcp), { recursive: true });
+    await writeFile(expMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: guiRoot });
+    expect(r).toBe(path.resolve(repoMcp));
+  });
+
+  it("uses .cursor/mcp.json when top-level mcp.json is missing", async () => {
+    const cursorMcp = path.join(tmpDir, ".cursor", "mcp.json");
+    await mkdir(path.dirname(cursorMcp), { recursive: true });
+    await writeFile(cursorMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "g") });
+    expect(r).toBe(path.resolve(cursorMcp));
+  });
+
+  it("uses experiments/mcp.json under ralph-gui when repo has no mcp", async () => {
+    const guiRoot = path.join(tmpDir, "ralph-gui");
+    const expMcp = path.join(guiRoot, "experiments", "mcp.json");
+    await mkdir(path.dirname(expMcp), { recursive: true });
+    await writeFile(expMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: guiRoot });
+    expect(r).toBe(path.resolve(expMcp));
+  });
+
+  it("uses ralph-gui root mcp.json when higher-priority files are missing", async () => {
+    const guiRoot = path.join(tmpDir, "ralph-gui");
+    const rootMcp = path.join(guiRoot, "mcp.json");
+    await mkdir(guiRoot, { recursive: true });
+    await writeFile(rootMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: guiRoot });
+    expect(r).toBe(path.resolve(rootMcp));
+  });
+
+  it("returns null when nothing exists", async () => {
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "empty") });
+    expect(r).toBe(null);
+  });
+});
+
 describe("normalizePromptForArgv", () => {
   it("prefixes prompts that start with a dash so argv parsers treat them as text", () => {
     expect(normalizePromptForArgv("--not-a-flag")).toBe("\n--not-a-flag");
@@ -244,6 +343,37 @@ describe("LLMCaller.call", () => {
 
     expect(command).toBe(process.env.COPILOT_BIN);
     expect(args).toEqual([
+      "--model", "gpt-5-mini",
+      "--autopilot", "-s", "--yolo", "--no-color",
+      "--reasoning-effort", "high",
+    ]);
+    expect(proc.stdin.write).toHaveBeenCalledWith("hello prompt");
+
+    proc.stdout.emit("data", Buffer.from("ok"));
+    proc.emit("close", 0);
+    await expect(resultPromise).resolves.toBe("ok");
+  });
+
+  it("passes --additional-mcp-config @file for copilot when agentMcpConfig is set", async () => {
+    const mcpPath = path.join(tmpDir, "copilot-mcp.json");
+    await writeFile(mcpPath, '{"mcpServers":{}}', "utf-8");
+    process.env.COPILOT_BIN = await makeExecutable("copilot");
+    const caller = new LLMCaller(() => true);
+
+    const resultPromise = caller.call("hello prompt", "gpt-5-mini", tmpDir, {
+      agentBackend: "copilot",
+      agentMcpConfig: "copilot-mcp.json",
+      reasoningEffort: "high",
+    });
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    const [command, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const proc = spawnMock.mock.results[0].value as MockChildProcess;
+
+    expect(command).toBe(process.env.COPILOT_BIN);
+    expect(args).toEqual([
+      "--additional-mcp-config",
+      `@${path.resolve(mcpPath)}`,
       "--model", "gpt-5-mini",
       "--autopilot", "-s", "--yolo", "--no-color",
       "--reasoning-effort", "high",
@@ -387,6 +517,92 @@ describe("LLMCaller.call", () => {
       }),
     ).rejects.toThrow("Prompt too large to pass via argv for claude");
 
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("injects --mcp-config before -p for claude", async () => {
+    const mcpPath = path.join(tmpDir, "servers-mcp.json");
+    await writeFile(mcpPath, "{}", "utf-8");
+    process.env.CLAUDE_BIN = await makeExecutable("claude");
+    const caller = new LLMCaller(() => true);
+
+    const resultPromise = caller.call("claude prompt", "claude-sonnet-4.6", tmpDir, {
+      agentBackend: "claude",
+      agentMcpConfig: "servers-mcp.json",
+      reasoningEffort: "high",
+    });
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    const [command, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const proc = spawnMock.mock.results[0].value as MockChildProcess;
+
+    expect(command).toBe(process.env.CLAUDE_BIN);
+    expect(args.slice(0, 4)).toEqual(["--mcp-config", path.resolve(mcpPath), "-p", "claude prompt"]);
+    expect(args).toEqual([
+      "--mcp-config",
+      path.resolve(mcpPath),
+      "-p",
+      "claude prompt",
+      "--model",
+      "claude-sonnet-4.6",
+      "--permission-mode",
+      "bypassPermissions",
+      "--output-format",
+      "text",
+      "--effort",
+      "high",
+    ]);
+    expect(proc.stdin.write).not.toHaveBeenCalled();
+
+    proc.stdout.emit("data", Buffer.from("ok"));
+    proc.emit("close", 0);
+    await expect(resultPromise).resolves.toBe("ok");
+  });
+
+  it("adds --mcp-config to cursor-agent when help advertises the flag", async () => {
+    const mcpPath = path.join(tmpDir, "custom-mcp.json");
+    await writeFile(mcpPath, "{}", "utf-8");
+    process.env.CURSOR_AGENT_BIN = await makeExecutable("cursor-agent");
+    execFileMock.mockImplementation(
+      (_file, args, options, callback) => {
+        const cb = typeof options === "function" ? (options as (e: Error | null, s?: string) => void) : callback;
+        if (Array.isArray(args) && args[0] === "--help") {
+          setImmediate(() => (cb as (e: Error | null, s?: string) => void)(null, "Usage ...\n  --mcp-config <file>\n"));
+          return { on: vi.fn() } as { on: typeof vi.fn };
+        }
+        setImmediate(() => (cb as (e: Error) => void)(new Error("unexpected execFile")));
+        return { on: vi.fn() } as { on: typeof vi.fn };
+      },
+    );
+    const caller = new LLMCaller(() => true);
+
+    const resultPromise = caller.call("p", "gpt-5-mini", tmpDir, {
+      agentBackend: "cursor-agent",
+      agentMcpConfig: mcpPath,
+    });
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const proc = spawnMock.mock.results[0].value as MockChildProcess;
+
+    expect(args.slice(0, 3)).toEqual(["--mcp-config", mcpPath, "-p"]);
+    proc.stdout.emit("data", Buffer.from("ok"));
+    proc.emit("close", 0);
+    await expect(resultPromise).resolves.toBe("ok");
+  });
+
+  it("fails for cursor-agent when mcp file is not project .cursor/mcp.json and CLI has no mcp path flag", async () => {
+    const mcpPath = path.join(tmpDir, "elsewhere-mcp.json");
+    await writeFile(mcpPath, "{}", "utf-8");
+    process.env.CURSOR_AGENT_BIN = await makeExecutable("cursor-agent");
+    const caller = new LLMCaller(() => true);
+
+    await expect(
+      caller.call("p", "gpt-5-mini", tmpDir, {
+        agentBackend: "cursor-agent",
+        agentMcpConfig: mcpPath,
+      }),
+    ).rejects.toThrow("does not support an explicit MCP config flag");
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });

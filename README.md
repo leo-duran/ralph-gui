@@ -86,6 +86,17 @@ Reasoning effort support is backend-specific:
 
 If a CLI is not on `PATH`, set the matching `*_BIN` variable to the full executable path (especially on Windows when the command is `copilot.cmd`, `cursor-agent.cmd`, etc.).
 
+### MCP config (optional)
+
+Set `agentMcpConfig` in `ralph/settings.json` (or pass `--mcp-config <path>` to the server so it is persisted the same way). The value is a path to an MCP servers JSON file. Relative paths are resolved from the **target repository root**.
+
+**Auto-discovery (when the field is left empty):** the server uses the first file that exists, in this order: `<target-repo>/mcp.json`, `<target-repo>/.cursor/mcp.json`, `experiments/mcp.json` in the ralph-gui app tree, then `mcp.json` at the ralph-gui app root. So experiment sandboxes and the tool repo can each ship an `mcp.json` without per-project settings.
+
+- **GitHub Copilot CLI**: Ralph passes `--additional-mcp-config` with a file reference `@<absolutePath>` (per [Copilot CLI MCP docs](https://docs.github.com/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers)), merged with your global `~/.copilot/mcp-config.json` for that run.
+- **Claude Code**: Ralph passes `--mcp-config` with the absolute path **before** `-p` (per Claude’s argv rules).
+- **Cursor Agent**: If `cursor-agent --help` includes an MCP file flag (e.g. `--mcp-config`), Ralph uses it. If not, the resolved path must be the project file at `<repo>/.cursor/mcp.json` (use that path, or a symlink there). Otherwise Ralph errors with a clear message.
+- **Gemini**: The setting is ignored.
+
 ## Quick start
 
 ```bash
@@ -134,6 +145,7 @@ Use `start.sh` with a repo and optional settings overrides. The UI is still ther
   --min-backlog-size 3 \
   --auto-commit false \
   --exit-when-complete
+# Optional: --mcp-config .cursor/mcp.json
 ```
 
 Behavior:

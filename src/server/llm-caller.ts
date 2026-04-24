@@ -1,8 +1,9 @@
 // LLM CLI invocation supporting copilot, cursor-agent, claude, and gemini backends
-import { spawn, type ChildProcess } from "child_process";
+import { execFile, spawn, type ChildProcess } from "child_process";
 import { constants } from "fs";
 import { access } from "fs/promises";
 import path from "path";
+import { fileURLToPath } from "url";
 
 export const AGENT_BACKENDS = ["copilot", "cursor-agent", "claude", "gemini"] as const;
 export type AgentBackendId = (typeof AGENT_BACKENDS)[number];
@@ -10,6 +11,8 @@ export type AgentBackendId = (typeof AGENT_BACKENDS)[number];
 export interface LLMCallOpts {
   agentBackend?: AgentBackendId;
   reasoningEffort?: string;
+  /** Path to MCP server JSON; relative to repo root. Empty: auto-pick mcp.json if found (see resolveEffectiveMcpConfigPath). */
+  agentMcpConfig?: string;
 }
 
 /** @deprecated Use LLMCallOpts instead */
@@ -246,6 +249,104 @@ function assertPromptFitsArgv(prompt: string, backend: AgentBackendId): void {
   );
 }
 
+/**
+ * Resolves a non-empty agentMcpConfig to an absolute path and verifies the file exists.
+ * Empty/undefined config returns null (no MCP file).
+ */
+export async function resolveAgentMcpConfigPath(
+  agentMcpConfig: string | undefined,
+  repoRoot: string,
+): Promise<string | null> {
+  const trimmed = agentMcpConfig?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const resolved = path.isAbsolute(trimmed) ? path.resolve(trimmed) : path.resolve(repoRoot, trimmed);
+  try {
+    await access(resolved, constants.F_OK);
+  } catch {
+    throw new Error(
+      `MCP config file not found: ${resolved} (from agentMcpConfig "${trimmed}").`,
+    );
+  }
+  return resolved;
+}
+
+/** Cached ralph-gui app root: package containing this file (…/ralph-gui, not the target repo). */
+let ralphGuiProjectRootCache: string | null = null;
+
+function getRalphGuiProjectRootFromModule(): string {
+  if (ralphGuiProjectRootCache === null) {
+    ralphGuiProjectRootCache = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+  }
+  return ralphGuiProjectRootCache;
+}
+
+export interface ResolveMcpConfigOptions {
+  /** Override the ralph-gui app root (for tests). Defaults to the directory of this package. */
+  ralphGuiProjectRoot?: string;
+}
+
+/**
+ * Resolves the MCP config file to pass to the agent CLI.
+ * - If `agentMcpConfig` is set: same as {@link resolveAgentMcpConfigPath} (file must exist).
+ * - If unset/empty: first existing file, in order:
+ *   1. `<targetRepo>/mcp.json`
+ *   2. `<targetRepo>/.cursor/mcp.json`
+ *   3. `<ralph-gui>/experiments/mcp.json`
+ *   4. `<ralph-gui>/mcp.json`
+ */
+export async function resolveEffectiveMcpConfigPath(
+  agentMcpConfig: string | undefined,
+  repoRoot: string,
+  options?: ResolveMcpConfigOptions,
+): Promise<string | null> {
+  const explicit = agentMcpConfig?.trim();
+  if (explicit) {
+    return resolveAgentMcpConfigPath(agentMcpConfig, repoRoot);
+  }
+  const base = path.resolve(repoRoot);
+  const ralphGui = path.resolve(options?.ralphGuiProjectRoot ?? getRalphGuiProjectRootFromModule());
+  const candidates = [
+    path.join(base, "mcp.json"),
+    path.join(base, ".cursor", "mcp.json"),
+    path.join(ralphGui, "experiments", "mcp.json"),
+    path.join(ralphGui, "mcp.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.F_OK);
+      return path.resolve(candidate);
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+const CURSOR_AGENT_HELP_TIMEOUT_MS = 10_000;
+
+function mcpConfigFlagFromCursorHelp(help: string): string | null {
+  if (/--mcp-config\b/.test(help)) {
+    return "--mcp-config";
+  }
+  if (/--mcpfile\b/.test(help)) {
+    return "--mcpfile";
+  }
+  if (/--mcp-file\b/.test(help)) {
+    return "--mcp-file";
+  }
+  return null;
+}
+
+function expectedProjectMcpPath(repoRoot: string): string {
+  return path.resolve(path.join(repoRoot, ".cursor", "mcp.json"));
+}
+
+/** GitHub Copilot CLI: extra MCP config via file reference (see add-mcp-servers in Copilot CLI docs). */
+function copilotAdditionalMcpConfigArgValue(resolvedMcpPath: string): string {
+  return `@${resolvedMcpPath}`;
+}
 
 async function resolveCommandForBackend(
   backend: AgentBackendId,
@@ -270,6 +371,8 @@ export class LLMCaller {
   private killTimer: NodeJS.Timeout | null = null;
   /** Resolved executable path per backend id */
   private cachedCommands = new Map<AgentBackendId, string>();
+  /** Raw `cursor-agent --help` text (for MCP flag discovery) */
+  private cursorAgentHelpText: string | null = null;
 
   constructor(isRunning: () => boolean) {
     this.isRunning = isRunning;
@@ -277,6 +380,39 @@ export class LLMCaller {
 
   clearCommandCache(): void {
     this.cachedCommands.clear();
+  }
+
+  private getCursorAgentHelpText(command: string): Promise<string> {
+    if (this.cursorAgentHelpText !== null) {
+      return Promise.resolve(this.cursorAgentHelpText);
+    }
+    return new Promise((resolve, reject) => {
+      const child = execFile(
+        command,
+        ["--help"],
+        {
+          timeout: CURSOR_AGENT_HELP_TIMEOUT_MS,
+          maxBuffer: 2_000_000,
+          windowsHide: true,
+        },
+        (err, stdout, stderr) => {
+          const out = (stdout || stderr || "").toString();
+          if (err && !out) {
+            reject(
+              new Error(
+                `Could not read cursor-agent --help: ${(err as Error & { code?: string }).message ?? err}`,
+              ),
+            );
+            return;
+          }
+          this.cursorAgentHelpText = out;
+          resolve(out);
+        },
+      );
+      child.on("error", (e) => {
+        reject(new Error(`Could not run cursor-agent --help: ${(e as Error).message}`));
+      });
+    });
   }
 
   call(
@@ -305,6 +441,13 @@ export class LLMCaller {
           return;
         }
 
+        const mcpPath = await resolveEffectiveMcpConfigPath(opts.agentMcpConfig, repoRoot);
+
+        if (!this.isRunning()) {
+          reject(new Error("Loop was stopped"));
+          return;
+        }
+
         const cli = backendCliLabel(backend);
         const reasoningEffort = backendSupportsReasoningEffort(backend) ? opts.reasoningEffort : undefined;
         let args: string[];
@@ -313,6 +456,12 @@ export class LLMCaller {
         switch (backend) {
           case "copilot": {
             args = ["--model", model, "--autopilot", "-s", "--yolo", "--no-color"];
+            if (mcpPath) {
+              args.unshift(
+                "--additional-mcp-config",
+                copilotAdditionalMcpConfigArgValue(mcpPath),
+              );
+            }
             if (reasoningEffort) {
               args.push("--reasoning-effort", reasoningEffort);
             }
@@ -321,29 +470,79 @@ export class LLMCaller {
           }
           case "cursor-agent": {
             assertPromptFitsArgv(prompt, backend);
-            args = [
-              "-p",
-              normalizePromptForArgv(prompt),
-              "--model",
-              model,
-              ...CURSOR_AGENT_NON_INTERACTIVE_FLAGS,
-              "--output-format",
-              "text",
-            ];
+            if (mcpPath) {
+              const help = await this.getCursorAgentHelpText(command);
+              const mcpFlag = mcpConfigFlagFromCursorHelp(help);
+              if (mcpFlag) {
+                args = [
+                  mcpFlag,
+                  mcpPath,
+                  "-p",
+                  normalizePromptForArgv(prompt),
+                  "--model",
+                  model,
+                  ...CURSOR_AGENT_NON_INTERACTIVE_FLAGS,
+                  "--output-format",
+                  "text",
+                ];
+              } else {
+                const expected = expectedProjectMcpPath(repoRoot);
+                if (path.resolve(mcpPath) !== path.resolve(expected)) {
+                  throw new Error(
+                    `Cursor Agent does not support an explicit MCP config flag in this version. ` +
+                      `Point agentMcpConfig at the project file ${expected}, or create a symlink there, ` +
+                      `or upgrade cursor-agent. Requested: ${mcpPath}`,
+                  );
+                }
+                args = [
+                  "-p",
+                  normalizePromptForArgv(prompt),
+                  "--model",
+                  model,
+                  ...CURSOR_AGENT_NON_INTERACTIVE_FLAGS,
+                  "--output-format",
+                  "text",
+                ];
+              }
+            } else {
+              args = [
+                "-p",
+                normalizePromptForArgv(prompt),
+                "--model",
+                model,
+                ...CURSOR_AGENT_NON_INTERACTIVE_FLAGS,
+                "--output-format",
+                "text",
+              ];
+            }
             writeStdin = null;
             break;
           }
           case "claude": {
             assertPromptFitsArgv(prompt, backend);
-            args = [
-              "-p",
-              normalizePromptForArgv(prompt),
-              "--model",
-              model,
-              ...CLAUDE_NON_INTERACTIVE_FLAGS,
-              "--output-format",
-              "text",
-            ];
+            if (mcpPath) {
+              args = [
+                "--mcp-config",
+                mcpPath,
+                "-p",
+                normalizePromptForArgv(prompt),
+                "--model",
+                model,
+                ...CLAUDE_NON_INTERACTIVE_FLAGS,
+                "--output-format",
+                "text",
+              ];
+            } else {
+              args = [
+                "-p",
+                normalizePromptForArgv(prompt),
+                "--model",
+                model,
+                ...CLAUDE_NON_INTERACTIVE_FLAGS,
+                "--output-format",
+                "text",
+              ];
+            }
             if (reasoningEffort) {
               args.push("--effort", reasoningEffort);
             }
