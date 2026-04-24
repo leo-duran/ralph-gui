@@ -53,13 +53,13 @@ export function LoopConfigSection({
           onChange={(e) =>
             onChangeSettings({ ...localSettings, agentMcpConfig: e.target.value })
           }
-          placeholder="e.g. .cursor/mcp.json (empty = default)"
+          placeholder="e.g. .cursor/mcp.json (empty = auto-pick mcp.json if found)"
           autoComplete="off"
           spellCheck={false}
         />
       </label>
       <p className="cp-hint">
-        Optional path to MCP servers JSON, relative to the target repo root (or absolute). Used by Copilot (extra config), Claude Code, and Cursor Agent; leave empty to disable.
+        Optional path to MCP servers JSON, relative to the target repo root (or absolute). Used by Copilot (extra config), Claude Code, and Cursor Agent. Leave empty to auto-use the first mcp.json found (target repo, ralph-gui experiments, or ralph-gui root).
       </p>
 
       <label className="cp-field">

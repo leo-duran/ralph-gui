@@ -3,6 +3,7 @@ import { execFile, spawn, type ChildProcess } from "child_process";
 import { constants } from "fs";
 import { access } from "fs/promises";
 import path from "path";
+import { fileURLToPath } from "url";
 
 export const AGENT_BACKENDS = ["copilot", "cursor-agent", "claude", "gemini"] as const;
 export type AgentBackendId = (typeof AGENT_BACKENDS)[number];
@@ -10,7 +11,7 @@ export type AgentBackendId = (typeof AGENT_BACKENDS)[number];
 export interface LLMCallOpts {
   agentBackend?: AgentBackendId;
   reasoningEffort?: string;
-  /** Path to MCP server JSON; relative to repo root. Used by claude and cursor-agent. */
+  /** Path to MCP server JSON; relative to repo root. Empty: auto-pick mcp.json if found (see resolveEffectiveMcpConfigPath). */
   agentMcpConfig?: string;
 }
 
@@ -271,6 +272,58 @@ export async function resolveAgentMcpConfigPath(
   return resolved;
 }
 
+/** Cached ralph-gui app root: package containing this file (…/ralph-gui, not the target repo). */
+let ralphGuiProjectRootCache: string | null = null;
+
+function getRalphGuiProjectRootFromModule(): string {
+  if (ralphGuiProjectRootCache === null) {
+    ralphGuiProjectRootCache = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+  }
+  return ralphGuiProjectRootCache;
+}
+
+export interface ResolveMcpConfigOptions {
+  /** Override the ralph-gui app root (for tests). Defaults to the directory of this package. */
+  ralphGuiProjectRoot?: string;
+}
+
+/**
+ * Resolves the MCP config file to pass to the agent CLI.
+ * - If `agentMcpConfig` is set: same as {@link resolveAgentMcpConfigPath} (file must exist).
+ * - If unset/empty: first existing file, in order:
+ *   1. `<targetRepo>/mcp.json`
+ *   2. `<targetRepo>/.cursor/mcp.json`
+ *   3. `<ralph-gui>/experiments/mcp.json`
+ *   4. `<ralph-gui>/mcp.json`
+ */
+export async function resolveEffectiveMcpConfigPath(
+  agentMcpConfig: string | undefined,
+  repoRoot: string,
+  options?: ResolveMcpConfigOptions,
+): Promise<string | null> {
+  const explicit = agentMcpConfig?.trim();
+  if (explicit) {
+    return resolveAgentMcpConfigPath(agentMcpConfig, repoRoot);
+  }
+  const base = path.resolve(repoRoot);
+  const ralphGui = path.resolve(options?.ralphGuiProjectRoot ?? getRalphGuiProjectRootFromModule());
+  const candidates = [
+    path.join(base, "mcp.json"),
+    path.join(base, ".cursor", "mcp.json"),
+    path.join(ralphGui, "experiments", "mcp.json"),
+    path.join(ralphGui, "mcp.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.F_OK);
+      return path.resolve(candidate);
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
 const CURSOR_AGENT_HELP_TIMEOUT_MS = 10_000;
 
 function mcpConfigFlagFromCursorHelp(help: string): string | null {
@@ -388,7 +441,7 @@ export class LLMCaller {
           return;
         }
 
-        const mcpPath = await resolveAgentMcpConfigPath(opts.agentMcpConfig, repoRoot);
+        const mcpPath = await resolveEffectiveMcpConfigPath(opts.agentMcpConfig, repoRoot);
 
         if (!this.isRunning()) {
           reject(new Error("Loop was stopped"));

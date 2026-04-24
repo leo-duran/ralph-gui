@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import os from "os";
 import path from "path";
-import { chmod, mkdtemp, rm, writeFile } from "fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 
 const { spawnMock, execFileMock } = vi.hoisted(() => ({ spawnMock: vi.fn(), execFileMock: vi.fn() }));
 
@@ -15,6 +15,7 @@ import {
   backendSupportsReasoningEffort,
   LLMCaller,
   resolveAgentMcpConfigPath,
+  resolveEffectiveMcpConfigPath,
   normalizeAgentBackend,
   normalizePromptForArgv,
   resolveClaudeCommand,
@@ -242,6 +243,64 @@ describe("resolveAgentMcpConfigPath", () => {
     await expect(
       resolveAgentMcpConfigPath("nope-mcp.json", tmpDir),
     ).rejects.toThrow("MCP config file not found");
+  });
+});
+
+describe("resolveEffectiveMcpConfigPath", () => {
+  it("uses explicit path when set", async () => {
+    const f = path.join(tmpDir, "e.json");
+    await writeFile(f, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath("e.json", tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "x") });
+    expect(r).toBe(path.resolve(f));
+  });
+
+  it("picks target repo mcp.json when no explicit config", async () => {
+    const f = path.join(tmpDir, "mcp.json");
+    await writeFile(f, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath("", tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "gui") });
+    expect(r).toBe(path.resolve(f));
+  });
+
+  it("prefers target repo mcp.json over ralph-gui fallbacks", async () => {
+    const repoMcp = path.join(tmpDir, "mcp.json");
+    const guiRoot = path.join(tmpDir, "gui");
+    await writeFile(repoMcp, "{}", "utf-8");
+    const expMcp = path.join(guiRoot, "experiments", "mcp.json");
+    await mkdir(path.dirname(expMcp), { recursive: true });
+    await writeFile(expMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: guiRoot });
+    expect(r).toBe(path.resolve(repoMcp));
+  });
+
+  it("uses .cursor/mcp.json when top-level mcp.json is missing", async () => {
+    const cursorMcp = path.join(tmpDir, ".cursor", "mcp.json");
+    await mkdir(path.dirname(cursorMcp), { recursive: true });
+    await writeFile(cursorMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "g") });
+    expect(r).toBe(path.resolve(cursorMcp));
+  });
+
+  it("uses experiments/mcp.json under ralph-gui when repo has no mcp", async () => {
+    const guiRoot = path.join(tmpDir, "ralph-gui");
+    const expMcp = path.join(guiRoot, "experiments", "mcp.json");
+    await mkdir(path.dirname(expMcp), { recursive: true });
+    await writeFile(expMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: guiRoot });
+    expect(r).toBe(path.resolve(expMcp));
+  });
+
+  it("uses ralph-gui root mcp.json when higher-priority files are missing", async () => {
+    const guiRoot = path.join(tmpDir, "ralph-gui");
+    const rootMcp = path.join(guiRoot, "mcp.json");
+    await mkdir(guiRoot, { recursive: true });
+    await writeFile(rootMcp, "{}", "utf-8");
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: guiRoot });
+    expect(r).toBe(path.resolve(rootMcp));
+  });
+
+  it("returns null when nothing exists", async () => {
+    const r = await resolveEffectiveMcpConfigPath(undefined, tmpDir, { ralphGuiProjectRoot: path.join(tmpDir, "empty") });
+    expect(r).toBe(null);
   });
 });
 
