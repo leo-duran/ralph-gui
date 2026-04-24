@@ -90,9 +90,10 @@ If a CLI is not on `PATH`, set the matching `*_BIN` variable to the full executa
 
 Set `agentMcpConfig` in `ralph/settings.json` (or pass `--mcp-config <path>` to the server so it is persisted the same way). The value is a path to an MCP servers JSON file. Relative paths are resolved from the **target repository root**.
 
+- **GitHub Copilot CLI**: Ralph passes `--additional-mcp-config` with a file reference `@<absolutePath>` (per [Copilot CLI MCP docs](https://docs.github.com/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers)), merged with your global `~/.copilot/mcp-config.json` for that run.
 - **Claude Code**: Ralph passes `--mcp-config` with the absolute path **before** `-p` (per Claude’s argv rules).
 - **Cursor Agent**: If `cursor-agent --help` includes an MCP file flag (e.g. `--mcp-config`), Ralph uses it. If not, the resolved path must be the project file at `<repo>/.cursor/mcp.json` (use that path, or a symlink there). Otherwise Ralph errors with a clear message.
-- **Copilot / Gemini**: The setting is ignored (those flows do not apply this file).
+- **Gemini**: The setting is ignored.
 
 ## Quick start
 

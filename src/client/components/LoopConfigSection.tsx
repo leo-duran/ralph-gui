@@ -59,7 +59,7 @@ export function LoopConfigSection({
         />
       </label>
       <p className="cp-hint">
-        Optional path to MCP servers JSON, relative to the target repo root (or absolute). Used by Claude Code and Cursor Agent; leave empty to disable.
+        Optional path to MCP servers JSON, relative to the target repo root (or absolute). Used by Copilot (extra config), Claude Code, and Cursor Agent; leave empty to disable.
       </p>
 
       <label className="cp-field">

@@ -295,6 +295,37 @@ describe("LLMCaller.call", () => {
     await expect(resultPromise).resolves.toBe("ok");
   });
 
+  it("passes --additional-mcp-config @file for copilot when agentMcpConfig is set", async () => {
+    const mcpPath = path.join(tmpDir, "copilot-mcp.json");
+    await writeFile(mcpPath, '{"mcpServers":{}}', "utf-8");
+    process.env.COPILOT_BIN = await makeExecutable("copilot");
+    const caller = new LLMCaller(() => true);
+
+    const resultPromise = caller.call("hello prompt", "gpt-5-mini", tmpDir, {
+      agentBackend: "copilot",
+      agentMcpConfig: "copilot-mcp.json",
+      reasoningEffort: "high",
+    });
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    const [command, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const proc = spawnMock.mock.results[0].value as MockChildProcess;
+
+    expect(command).toBe(process.env.COPILOT_BIN);
+    expect(args).toEqual([
+      "--additional-mcp-config",
+      `@${path.resolve(mcpPath)}`,
+      "--model", "gpt-5-mini",
+      "--autopilot", "-s", "--yolo", "--no-color",
+      "--reasoning-effort", "high",
+    ]);
+    expect(proc.stdin.write).toHaveBeenCalledWith("hello prompt");
+
+    proc.stdout.emit("data", Buffer.from("ok"));
+    proc.emit("close", 0);
+    await expect(resultPromise).resolves.toBe("ok");
+  });
+
   it("passes prompt in argv for cursor-agent and does not write stdin", async () => {
     process.env.CURSOR_AGENT_BIN = await makeExecutable("cursor-agent");
     const caller = new LLMCaller(() => true);

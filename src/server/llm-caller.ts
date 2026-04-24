@@ -290,6 +290,11 @@ function expectedProjectMcpPath(repoRoot: string): string {
   return path.resolve(path.join(repoRoot, ".cursor", "mcp.json"));
 }
 
+/** GitHub Copilot CLI: extra MCP config via file reference (see add-mcp-servers in Copilot CLI docs). */
+function copilotAdditionalMcpConfigArgValue(resolvedMcpPath: string): string {
+  return `@${resolvedMcpPath}`;
+}
+
 async function resolveCommandForBackend(
   backend: AgentBackendId,
   env: NodeJS.ProcessEnv,
@@ -398,6 +403,12 @@ export class LLMCaller {
         switch (backend) {
           case "copilot": {
             args = ["--model", model, "--autopilot", "-s", "--yolo", "--no-color"];
+            if (mcpPath) {
+              args.unshift(
+                "--additional-mcp-config",
+                copilotAdditionalMcpConfigArgValue(mcpPath),
+              );
+            }
             if (reasoningEffort) {
               args.push("--reasoning-effort", reasoningEffort);
             }
