@@ -46,6 +46,23 @@ export function LoopConfigSection({
       </label>
 
       <label className="cp-field">
+        <span>MCP config path</span>
+        <input
+          type="text"
+          value={localSettings.agentMcpConfig}
+          onChange={(e) =>
+            onChangeSettings({ ...localSettings, agentMcpConfig: e.target.value })
+          }
+          placeholder="e.g. .cursor/mcp.json (empty = default)"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </label>
+      <p className="cp-hint">
+        Optional path to MCP servers JSON, relative to the target repo root (or absolute). Used by Claude Code and Cursor Agent; leave empty to disable.
+      </p>
+
+      <label className="cp-field">
         <span>Max LLM Calls</span>
         <input
           type="number"
