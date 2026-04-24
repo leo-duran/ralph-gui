@@ -68,6 +68,7 @@ export interface Settings {
   epicFile: string;
   requirementsFile: string;
   pauseAfterPlan: boolean;
+  agentMcpConfig: string;
 }
 
 export interface Readiness {

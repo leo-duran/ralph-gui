@@ -65,6 +65,7 @@ Settings overrides (persisted to ralph/settings.json):
   --plan-frequency <n>
   --min-backlog-size <n>
   --auto-commit <true|false>
+  --mcp-config <path>            MCP servers JSON (path relative to target repo or absolute); saved in ralph/settings.json
 EOF
   exit 0
 fi

@@ -20,6 +20,8 @@ export interface Settings {
   // Relative path to the requirements file; empty string means auto-discover
   requirementsFile: string;
   pauseAfterPlan: boolean;
+  // Path to MCP server JSON; empty = unset. Relative paths resolve from the target repo root.
+  agentMcpConfig: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -36,6 +38,7 @@ export const DEFAULT_SETTINGS: Settings = {
   epicFile: "ralph/epic.md",
   requirementsFile: "",
   pauseAfterPlan: false,
+  agentMcpConfig: "",
 };
 
 export class SettingsManager {

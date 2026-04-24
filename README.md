@@ -86,6 +86,14 @@ Reasoning effort support is backend-specific:
 
 If a CLI is not on `PATH`, set the matching `*_BIN` variable to the full executable path (especially on Windows when the command is `copilot.cmd`, `cursor-agent.cmd`, etc.).
 
+### MCP config (optional)
+
+Set `agentMcpConfig` in `ralph/settings.json` (or pass `--mcp-config <path>` to the server so it is persisted the same way). The value is a path to an MCP servers JSON file. Relative paths are resolved from the **target repository root**.
+
+- **Claude Code**: Ralph passes `--mcp-config` with the absolute path **before** `-p` (per Claude’s argv rules).
+- **Cursor Agent**: If `cursor-agent --help` includes an MCP file flag (e.g. `--mcp-config`), Ralph uses it. If not, the resolved path must be the project file at `<repo>/.cursor/mcp.json` (use that path, or a symlink there). Otherwise Ralph errors with a clear message.
+- **Copilot / Gemini**: The setting is ignored (those flows do not apply this file).
+
 ## Quick start
 
 ```bash
@@ -134,6 +142,7 @@ Use `start.sh` with a repo and optional settings overrides. The UI is still ther
   --min-backlog-size 3 \
   --auto-commit false \
   --exit-when-complete
+# Optional: --mcp-config .cursor/mcp.json
 ```
 
 Behavior:

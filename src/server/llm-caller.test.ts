@@ -4,15 +4,17 @@ import os from "os";
 import path from "path";
 import { chmod, mkdtemp, rm, writeFile } from "fs/promises";
 
-const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }));
+const { spawnMock, execFileMock } = vi.hoisted(() => ({ spawnMock: vi.fn(), execFileMock: vi.fn() }));
 
 vi.mock("child_process", () => ({
   spawn: spawnMock,
+  execFile: execFileMock,
 }));
 
 import {
   backendSupportsReasoningEffort,
   LLMCaller,
+  resolveAgentMcpConfigPath,
   normalizeAgentBackend,
   normalizePromptForArgv,
   resolveClaudeCommand,
@@ -46,6 +48,22 @@ beforeEach(async () => {
   tmpDir = await mkdtemp(path.join(os.tmpdir(), "ralph-copilot-"));
   spawnMock.mockReset();
   spawnMock.mockImplementation(() => new MockChildProcess());
+  execFileMock.mockReset();
+  execFileMock.mockImplementation(
+    (_file, args, options, callback) => {
+      const cb = typeof options === "function" ? (options as (err: Error | null, stdout?: string) => void) : callback;
+      if (Array.isArray(args) && args[0] === "--help") {
+        setImmediate(() => {
+          (cb as (e: Error | null, s?: string) => void)(null, "help text (no mcp path flag in this default mock)\n");
+        });
+        return { on: vi.fn() } as any;
+      }
+      setImmediate(() => {
+        (cb as (e: Error | null) => void)(new Error("unexpected execFile in test"));
+      });
+      return { on: vi.fn() } as any;
+    },
+  );
 });
 
 afterEach(async () => {
@@ -202,6 +220,28 @@ describe("normalizeAgentBackend", () => {
     expect(normalizeAgentBackend("Claude")).toBe("claude");
     expect(normalizeAgentBackend("gemini")).toBe("gemini");
     expect(normalizeAgentBackend("Gemini")).toBe("gemini");
+  });
+});
+
+describe("resolveAgentMcpConfigPath", () => {
+  it("returns null for empty or whitespace", async () => {
+    expect(await resolveAgentMcpConfigPath(undefined, tmpDir)).toBe(null);
+    expect(await resolveAgentMcpConfigPath("", tmpDir)).toBe(null);
+    expect(await resolveAgentMcpConfigPath("   ", tmpDir)).toBe(null);
+  });
+
+  it("resolves relative paths from repo root and validates existence", async () => {
+    const mcpName = "my-mcp.json";
+    const fullPath = path.join(tmpDir, mcpName);
+    await writeFile(fullPath, "{}", "utf-8");
+    const resolved = await resolveAgentMcpConfigPath(mcpName, tmpDir);
+    expect(resolved).toBe(path.resolve(fullPath));
+  });
+
+  it("throws when the file does not exist", async () => {
+    await expect(
+      resolveAgentMcpConfigPath("nope-mcp.json", tmpDir),
+    ).rejects.toThrow("MCP config file not found");
   });
 });
 
@@ -387,6 +427,92 @@ describe("LLMCaller.call", () => {
       }),
     ).rejects.toThrow("Prompt too large to pass via argv for claude");
 
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("injects --mcp-config before -p for claude", async () => {
+    const mcpPath = path.join(tmpDir, "servers-mcp.json");
+    await writeFile(mcpPath, "{}", "utf-8");
+    process.env.CLAUDE_BIN = await makeExecutable("claude");
+    const caller = new LLMCaller(() => true);
+
+    const resultPromise = caller.call("claude prompt", "claude-sonnet-4.6", tmpDir, {
+      agentBackend: "claude",
+      agentMcpConfig: "servers-mcp.json",
+      reasoningEffort: "high",
+    });
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    const [command, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const proc = spawnMock.mock.results[0].value as MockChildProcess;
+
+    expect(command).toBe(process.env.CLAUDE_BIN);
+    expect(args.slice(0, 4)).toEqual(["--mcp-config", path.resolve(mcpPath), "-p", "claude prompt"]);
+    expect(args).toEqual([
+      "--mcp-config",
+      path.resolve(mcpPath),
+      "-p",
+      "claude prompt",
+      "--model",
+      "claude-sonnet-4.6",
+      "--permission-mode",
+      "bypassPermissions",
+      "--output-format",
+      "text",
+      "--effort",
+      "high",
+    ]);
+    expect(proc.stdin.write).not.toHaveBeenCalled();
+
+    proc.stdout.emit("data", Buffer.from("ok"));
+    proc.emit("close", 0);
+    await expect(resultPromise).resolves.toBe("ok");
+  });
+
+  it("adds --mcp-config to cursor-agent when help advertises the flag", async () => {
+    const mcpPath = path.join(tmpDir, "custom-mcp.json");
+    await writeFile(mcpPath, "{}", "utf-8");
+    process.env.CURSOR_AGENT_BIN = await makeExecutable("cursor-agent");
+    execFileMock.mockImplementation(
+      (_file, args, options, callback) => {
+        const cb = typeof options === "function" ? (options as (e: Error | null, s?: string) => void) : callback;
+        if (Array.isArray(args) && args[0] === "--help") {
+          setImmediate(() => (cb as (e: Error | null, s?: string) => void)(null, "Usage ...\n  --mcp-config <file>\n"));
+          return { on: vi.fn() } as { on: typeof vi.fn };
+        }
+        setImmediate(() => (cb as (e: Error) => void)(new Error("unexpected execFile")));
+        return { on: vi.fn() } as { on: typeof vi.fn };
+      },
+    );
+    const caller = new LLMCaller(() => true);
+
+    const resultPromise = caller.call("p", "gpt-5-mini", tmpDir, {
+      agentBackend: "cursor-agent",
+      agentMcpConfig: mcpPath,
+    });
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const proc = spawnMock.mock.results[0].value as MockChildProcess;
+
+    expect(args.slice(0, 3)).toEqual(["--mcp-config", mcpPath, "-p"]);
+    proc.stdout.emit("data", Buffer.from("ok"));
+    proc.emit("close", 0);
+    await expect(resultPromise).resolves.toBe("ok");
+  });
+
+  it("fails for cursor-agent when mcp file is not project .cursor/mcp.json and CLI has no mcp path flag", async () => {
+    const mcpPath = path.join(tmpDir, "elsewhere-mcp.json");
+    await writeFile(mcpPath, "{}", "utf-8");
+    process.env.CURSOR_AGENT_BIN = await makeExecutable("cursor-agent");
+    const caller = new LLMCaller(() => true);
+
+    await expect(
+      caller.call("p", "gpt-5-mini", tmpDir, {
+        agentBackend: "cursor-agent",
+        agentMcpConfig: mcpPath,
+      }),
+    ).rejects.toThrow("does not support an explicit MCP config flag");
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });
